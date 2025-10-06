@@ -20,7 +20,6 @@ find_package(bspline_opt REQUIRED)
 find_package(traj_utils REQUIRED)
 find_package(poly_traj REQUIRED)
 # Optional: quadrotor_msgs if available
-find_package(quadrotor_msgs QUIET)
 
 # Messages (ROS 2)
 find_package(rosidl_default_generators REQUIRED)
@@ -117,11 +116,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../traj_utils/include")
   )
 endif()
 
-if(quadrotor_msgs_FOUND)
-  ament_target_dependencies(traj_server rclcpp nav_msgs visualization_msgs quadrotor_msgs bspline bspline_opt)
-else()
-  ament_target_dependencies(traj_server rclcpp nav_msgs visualization_msgs bspline bspline_opt)
-endif()
+
+ament_target_dependencies(traj_server rclcpp nav_msgs visualization_msgs bspline bspline_opt)
+
 ## Ensure linking against message typesupport within the same package
 rosidl_target_interfaces(traj_server ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
