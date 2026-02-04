@@ -50,7 +50,14 @@ public:
   double time_increase_;
   double last_time_inc_;
 
-  GlobalTrajData(/* args */) {}
+  GlobalTrajData(/* args */) {
+    // Initialize all member variables to safe defaults
+    global_duration_ = 0.0;
+    local_start_time_ = 1e10;  // Large value ensures we use global_traj initially
+    local_end_time_ = 1e10;
+    time_increase_ = 0.0;
+    last_time_inc_ = 0.0;
+  }
 
   ~GlobalTrajData() {}
 
@@ -63,8 +70,8 @@ public:
     global_start_time_ = time;
 
     local_traj_.clear();
-    local_start_time_ = -1;
-    local_end_time_ = -1;
+    local_start_time_ = global_duration_ + 1.0;  // Initialize to after global traj, not -1
+    local_end_time_ = global_duration_ + 1.0;
     time_increase_ = 0.0;
     last_time_inc_ = 0.0;
   }
@@ -83,6 +90,11 @@ public:
   }
 
   Eigen::Vector3d getPosition(double t) {
+    // Safety check: if local trajectory not initialized, use global trajectory
+    if (local_traj_.size() == 0) {
+      return global_traj_.evaluate(t - time_increase_ + last_time_inc_);
+    }
+    
     if (t >= -1e-3 && t <= local_start_time_) {
       return global_traj_.evaluate(t - time_increase_ + last_time_inc_);
     } else if (t >= local_end_time_ && t <= global_duration_ + 1e-3) {
@@ -95,6 +107,11 @@ public:
   }
 
   Eigen::Vector3d getVelocity(double t) {
+    // Safety check: if local trajectory not initialized, use global trajectory
+    if (local_traj_.size() == 0) {
+      return global_traj_.evaluateVel(t);
+    }
+    
     if (t >= -1e-3 && t <= local_start_time_) {
       return global_traj_.evaluateVel(t);
     } else if (t >= local_end_time_ && t <= global_duration_ + 1e-3) {
@@ -107,6 +124,11 @@ public:
   }
 
   Eigen::Vector3d getAcceleration(double t) {
+    // Safety check: if local trajectory not initialized, use global trajectory
+    if (local_traj_.size() == 0) {
+      return global_traj_.evaluateAcc(t);
+    }
+    
     if (t >= -1e-3 && t <= local_start_time_) {
       return global_traj_.evaluateAcc(t);
     } else if (t >= local_end_time_ && t <= global_duration_ + 1e-3) {

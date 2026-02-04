@@ -110,6 +110,9 @@ bool FastPlannerManager::checkTrajCollision(double& distance) {
     double dist = edt_environment_->evaluateCoarseEDT(fut_pt, -1.0);
     if (dist < 0.1) {
       distance = radius;
+      RCLCPP_WARN(rclcpp::get_logger("plan_manage"), 
+                  "[Collision Check] Collision at (%.2f, %.2f, %.2f), dist=%.3f, radius=%.3f", 
+                  fut_pt(0), fut_pt(1), fut_pt(2), dist, radius);
       return false;
     }
 
@@ -291,19 +294,29 @@ bool FastPlannerManager::planGlobalTraj(const Eigen::Vector3d& start_pos) {
 
   Eigen::Vector3d zero(0, 0, 0);
   Eigen::VectorXd time(pt_num - 1);
+  
+  std::cout << "[planGlobalTraj]: max_vel=" << pp_.max_vel_ << ", max_acc=" << pp_.max_acc_ << std::endl;
+  
   for (int i = 0; i < pt_num - 1; ++i) {
     time(i) = (pos.row(i + 1) - pos.row(i)).norm() / (pp_.max_vel_);
+    std::cout << "  Segment " << i << ": dist=" << (pos.row(i + 1) - pos.row(i)).norm() 
+              << ", time=" << time(i) << std::endl;
   }
 
   time(0) *= 2.0;
   time(0) = max(1.0, time(0));
   time(time.rows() - 1) *= 2.0;
   time(time.rows() - 1) = max(1.0, time(time.rows() - 1));
+  
+  std::cout << "[planGlobalTraj]: Total time allocation=" << time.sum() << "s" << std::endl;
 
   PolynomialTraj gl_traj = minSnapTraj(pos, zero, zero, zero, zero, time);
 
   auto time_now = clock_->now();
   global_data_.setGlobalTraj(gl_traj, time_now);
+  
+  std::cout << "[planGlobalTraj]: Global traj duration=" << global_data_.global_duration_ 
+            << "s, with " << pt_num << " waypoints" << std::endl;
 
   // truncate a local trajectory
 
@@ -334,22 +347,56 @@ bool FastPlannerManager::topoReplan(bool collide) {
   NonUniformBspline init_traj(ctrl_pts, 3, local_traj_dt);
   local_data_.start_time_ = time_now;
 
-  if (!collide) {  // simply truncate the segment and do nothing
+  // Hybrid approach: leverage 50ms timer's work for optimization
+  // Fast path: if collide flag is false, 50ms timer already confirmed no collisions
+  if (!collide) {
+    RCLCPP_DEBUG(rclcpp::get_logger("plan_manage"), "[Topo] Fast path: no collisions (from 50ms timer), using refineTraj");
     refineTraj(init_traj, time_inc);
     local_data_.position_traj_ = init_traj;
     global_data_.setLocalTraj(init_traj, t_now, local_traj_duration + time_inc + t_now, time_inc);
+    return true;
+  }
+  
+  // Slow path: collide flag is true - do full collision range computation
+  plan_data_.initial_local_segment_ = init_traj;
+  vector<Eigen::Vector3d> colli_start, colli_end, start_pts, end_pts;
+  findCollisionRange(colli_start, colli_end, start_pts, end_pts);
+  
+  // Determine if topological replanning is needed based on actual collision detection
+  // Valid collision range: must have both start and end points (trajectory enters and exits obstacle)
+  bool has_collision = (colli_start.size() > 0 && colli_end.size() > 0);
+  
+  if (!has_collision) {
+    // Full check found no valid collision range (edge case)
+    RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "[Topo] Full check: no collision range found, using refineTraj");
+    refineTraj(init_traj, time_inc);
+    local_data_.position_traj_ = init_traj;
+    global_data_.setLocalTraj(init_traj, t_now, local_traj_duration + time_inc + t_now, time_inc);
+    return true;
+  }
+  
+  // Valid collision range found - use topological replanning
+  RCLCPP_INFO(rclcpp::get_logger("plan_manage"), "[Topo] Collisions confirmed (start=%zu, end=%zu), triggering topological replan", 
+              colli_start.size(), colli_end.size());
+
+  if (colli_start.size() == 1 && colli_end.size() == 0) {
+    RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "Init traj ends in obstacle, no replanning.");
+    local_data_.position_traj_ = init_traj;
+    global_data_.setLocalTraj(init_traj, t_now, local_traj_duration + t_now, 0.0);
+    updateTrajInfo();
+    return true;
+
+  } else if (colli_end.size() == 0) {
+    // Trajectory ends in obstacle with multiple collision segments - can't replan
+    RCLCPP_WARN(rclcpp::get_logger("plan_manage"), 
+                "Trajectory ends in obstacle (colli_start=%zu, colli_end=%zu), no replanning.",
+                colli_start.size(), colli_end.size());
+    local_data_.position_traj_ = init_traj;
+    global_data_.setLocalTraj(init_traj, t_now, local_traj_duration + t_now, 0.0);
+    updateTrajInfo();
+    return true;
 
   } else {
-    plan_data_.initial_local_segment_ = init_traj;
-    vector<Eigen::Vector3d> colli_start, colli_end, start_pts, end_pts;
-    findCollisionRange(colli_start, colli_end, start_pts, end_pts);
-
-    if (colli_start.size() == 1 && colli_end.size() == 0) {
-      RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "Init traj ends in obstacle, no replanning.");
-      local_data_.position_traj_ = init_traj;
-      global_data_.setLocalTraj(init_traj, t_now, local_traj_duration + t_now, 0.0);
-
-    } else {
       NonUniformBspline best_traj;
 
       // local segment is in collision, call topological replanning
@@ -362,9 +409,20 @@ bool FastPlannerManager::topoReplan(bool collide) {
                                raw_paths, filtered_paths, select_paths);
 
       if (select_paths.size() == 0) {
-        RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "No path.");
+        RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "[Topo] No path found! Raw paths: %zu, Filtered: %zu, Select: %zu", 
+                    raw_paths.size(), filtered_paths.size(), select_paths.size());
+        RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "[Topo] Collision range: start=%zu points, end=%zu points", 
+                    colli_start.size(), colli_end.size());
+        if (colli_start.size() > 0 && colli_end.size() > 0) {
+          RCLCPP_WARN(rclcpp::get_logger("plan_manage"), "[Topo] Collision start: (%.2f, %.2f, %.2f), end: (%.2f, %.2f, %.2f)",
+                    colli_start.front()(0), colli_start.front()(1), colli_start.front()(2),
+                    colli_end.back()(0), colli_end.back()(1), colli_end.back()(2));
+        }
         return false;
       }
+      RCLCPP_INFO(rclcpp::get_logger("plan_manage"), 
+                  "[Topo] Found %zu candidate paths (raw: %zu, filtered: %zu)", 
+                  select_paths.size(), raw_paths.size(), filtered_paths.size());
       plan_data_.addTopoPaths(graph, raw_paths, filtered_paths, select_paths);
 
       /* optimize trajectory using different topo paths */
@@ -390,8 +448,11 @@ bool FastPlannerManager::topoReplan(bool collide) {
       local_data_.position_traj_ = best_traj;
       global_data_.setLocalTraj(local_data_.position_traj_, t_now,
                                 local_traj_duration + time_inc + t_now, time_inc);
+      updateTrajInfo();
+      return true;
     }
-  }
+  
+  // Should never reach here, but add return for safety
   updateTrajInfo();
   return true;
 }
@@ -516,6 +577,14 @@ Eigen::MatrixXd FastPlannerManager::reparamLocalTraj(double start_t, double& dt,
 
   global_data_.getTrajByRadius(start_t, pp_.local_traj_len_, pp_.ctrl_pt_dist, point_set,
                                start_end_derivative, dt, duration);
+
+  std::cout << "[reparamLocalTraj]: Sampled " << point_set.size() << " points, dt=" << dt 
+            << ", duration=" << duration << std::endl;
+  
+  if (point_set.size() < 2) {
+    std::cerr << "[reparamLocalTraj ERROR]: Insufficient points (" << point_set.size() 
+              << "), need at least 2!" << std::endl;
+  }
 
   /* parameterization of B-spline */
 

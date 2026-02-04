@@ -19,12 +19,31 @@ find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common)
 find_package(OpenCV REQUIRED)
 
-add_library(plan_env
+# Optional nvblox support - allows Fast-Planner to work with or without nvblox
+find_package(nvblox_msgs QUIET)
+if(nvblox_msgs_FOUND)
+  message(STATUS "nvblox_msgs found - enabling nvblox support")
+  add_definitions(-DUSE_NVBLOX)
+  set(USE_NVBLOX TRUE)
+else()
+  message(STATUS "nvblox_msgs not found - using standard SDF map (nvblox support disabled)")
+  set(USE_NVBLOX FALSE)
+endif()
+
+# Source files - conditionally include nvblox adapter
+set(plan_env_sources
   src/sdf_map.cpp
   src/obj_predictor.cpp
   src/edt_environment.cpp
   src/raycast.cpp
 )
+
+# Add nvblox adapter if available
+if(USE_NVBLOX)
+  list(APPEND plan_env_sources src/nvblox_sdf_map.cpp)
+endif()
+
+add_library(plan_env ${plan_env_sources})
 
 # Include directories
 target_include_directories(plan_env PUBLIC
@@ -42,6 +61,11 @@ set(_plan_env_deps
   message_filters
   pcl_conversions
 )
+
+# Conditionally add nvblox dependencies
+if(USE_NVBLOX)
+  list(APPEND _plan_env_deps nvblox_msgs)
+endif()
 
 ament_target_dependencies(plan_env
   ${_plan_env_deps}

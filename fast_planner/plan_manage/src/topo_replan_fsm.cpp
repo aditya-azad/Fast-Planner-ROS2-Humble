@@ -35,6 +35,7 @@ void TopoReplanFSM::init(rclcpp::Node& nh) {
   exec_state_  = FSM_EXEC_STATE::INIT;
   have_target_ = false;
   collide_     = false;
+  emergency_replan_count_ = 0;
   node_        = &nh;
   clock_       = nh.get_clock();
 
@@ -58,7 +59,7 @@ void TopoReplanFSM::init(rclcpp::Node& nh) {
   /* callback */
   using namespace std::chrono_literals;
   exec_timer_   = nh.create_wall_timer(10ms, std::bind(&TopoReplanFSM::execFSMCallback, this));
-  safety_timer_ = nh.create_wall_timer(50ms, std::bind(&TopoReplanFSM::checkCollisionCallback, this));
+  safety_timer_ = nh.create_wall_timer(20ms, std::bind(&TopoReplanFSM::checkCollisionCallback, this));
 
   waypoint_sub_ = nh.create_subscription<nav_msgs::msg::Path>(
       "/waypoint_generator/waypoints", 10,
@@ -78,19 +79,23 @@ void TopoReplanFSM::waypointCallback(const nav_msgs::msg::Path::ConstSharedPtr& 
 
   vector<Eigen::Vector3d> global_wp;
   if (target_type_ == TARGET_TYPE::REFENCE_PATH) {
-    for (int i = 0; i < waypoint_num_; ++i) {
+    // Use ALL waypoints from the incoming Path message (like waypoint_generator does)
+    cout << "[FSM]: REFERENCE_PATH mode, received " << msg->poses.size() << " poses" << endl;
+    for (size_t i = 0; i < msg->poses.size(); ++i) {
       Eigen::Vector3d pt;
-      pt(0) = waypoints_[i][0];
-      pt(1) = waypoints_[i][1];
-      pt(2) = waypoints_[i][2];
+      pt(0) = msg->poses[i].pose.position.x;
+      pt(1) = msg->poses[i].pose.position.y;
+      pt(2) = msg->poses[i].pose.position.z;
       global_wp.push_back(pt);
+      cout << "  Waypoint " << i << ": " << pt.transpose() << endl;
     }
+    cout << "[FSM]: Parsed " << global_wp.size() << " waypoints" << endl;
   } else {
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET) {
       target_point_(0) = msg->poses[0].pose.position.x;
       target_point_(1) = msg->poses[0].pose.position.y;
-      target_point_(2) = 1.0;
+      target_point_(2) = msg->poses[0].pose.position.z;  
       std::cout << "manual: " << target_point_.transpose() << std::endl;
 
     } else if (target_type_ == TARGET_TYPE::PRESET_TARGET) {
@@ -110,6 +115,7 @@ void TopoReplanFSM::waypointCallback(const nav_msgs::msg::Path::ConstSharedPtr& 
   end_vel_.setZero();
   have_target_ = true;
   trigger_     = true;
+  emergency_replan_count_ = 0;  // Reset emergency replan counter on new waypoints
 
   if (exec_state_ == WAIT_TARGET) {
     changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
@@ -218,8 +224,32 @@ void TopoReplanFSM::execFSMCallback() {
       double          t_cur       = (time_now - global_data->global_start_time_).seconds();
 
       if (t_cur > global_data->global_duration_ - 1e-2) {
-        have_target_ = false;
-        changeFSMExecState(WAIT_TARGET, "FSM");
+        // Check if we've actually reached the final waypoint
+        LocalTrajData* info = &planner_manager_->local_data_;
+        Eigen::Vector3d cur_pos = info->position_traj_.evaluateDeBoorT(t_cur);
+        
+        // Check if we have waypoints to compare against
+        if (planner_manager_->plan_data_.global_waypoints_.size() > 0) {
+          Eigen::Vector3d final_wp = planner_manager_->plan_data_.global_waypoints_.back();
+          double dist_to_final = (cur_pos - final_wp).norm();
+          
+          if (dist_to_final < 1.0) {
+            // Close enough to final waypoint - mission complete
+            RCLCPP_INFO(node_->get_logger(), "Reached final waypoint (dist=%.3f m). Mission complete.", dist_to_final);
+            have_target_ = false;
+            changeFSMExecState(WAIT_TARGET, "FSM");
+          } else {
+            // Global traj expired but not at final waypoint - continue replanning
+            RCLCPP_WARN(node_->get_logger(), "Global traj expired (t_cur=%.2f, duration=%.2f) but not at final waypoint (dist=%.3f m). Continuing replan...", 
+                       t_cur, global_data->global_duration_, dist_to_final);
+            changeFSMExecState(REPLAN_TRAJ, "FSM");
+          }
+        } else {
+          // No waypoints - just stop
+          RCLCPP_INFO(node_->get_logger(), "Global traj expired. No more waypoints.");
+          have_target_ = false;
+          changeFSMExecState(WAIT_TARGET, "FSM");
+        }
         return;
 
       } else {
@@ -258,9 +288,11 @@ void TopoReplanFSM::execFSMCallback() {
 
       bool success = callTopologicalTraj(2);
       if (success) {
+        // Reset emergency replan tracking on successful replan
+        emergency_replan_count_ = 0;
         changeFSMExecState(EXEC_TRAJ, "FSM");
       } else {
-  RCLCPP_WARN(node_->get_logger(), "Replan fail, retrying...");
+        RCLCPP_WARN(node_->get_logger(), "Replan fail, retrying...");
       }
 
       break;
@@ -361,16 +393,35 @@ void TopoReplanFSM::checkCollisionCallback() {
     bool   safe = planner_manager_->checkTrajCollision(dist);
     if (!safe) {
       if (dist > 0.5) {
-        RCLCPP_WARN(node_->get_logger(), "current traj %.3f m to collision", dist);
+        RCLCPP_WARN(node_->get_logger(), "[SAFETY] current traj %.3f m to collision (state=%d), triggering REPLAN_TRAJ", 
+                   dist, (int)exec_state_);
         collide_ = true;
         changeFSMExecState(REPLAN_TRAJ, "SAFETY");
       } else {
-        RCLCPP_ERROR(node_->get_logger(), "current traj %.3f m to collision, emergency stop!", dist);
+        // Very close to collision (<0.5m) - try aggressive replan instead of stopping
+        emergency_replan_count_++;
+        
+        RCLCPP_ERROR(node_->get_logger(), "[SAFETY] current traj %.3f m to collision, attempting emergency replan! (state=%d, count=%d)", 
+                    dist, (int)exec_state_, emergency_replan_count_);
         replan_pub_->publish(std_msgs::msg::Empty());
-        have_target_ = false;
-        changeFSMExecState(WAIT_TARGET, "SAFETY");
+        
+        // Stop after 3 failed attempts
+        if (emergency_replan_count_ > 3) {
+          RCLCPP_ERROR(node_->get_logger(), "[SAFETY] Emergency replan failed %d times. Stopping.", 
+                      emergency_replan_count_);
+          have_target_ = false;
+          changeFSMExecState(WAIT_TARGET, "SAFETY");
+          emergency_replan_count_ = 0;
+        } else {
+          changeFSMExecState(REPLAN_TRAJ, "SAFETY");
+        }
       }
     } else {
+      if (collide_) {
+        // Just cleared collision - reset emergency replan tracking
+        RCLCPP_INFO(node_->get_logger(), "[SAFETY] Trajectory now safe (dist > 6m), clearing collision flag");
+        emergency_replan_count_ = 0;  // Reset on trajectory becoming safe
+      }
       collide_ = false;
     }
   }

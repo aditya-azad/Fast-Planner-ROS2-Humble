@@ -41,34 +41,52 @@ const int BsplineOptimizer::NORMAL_PHASE =
     BsplineOptimizer::SMOOTHNESS | BsplineOptimizer::DISTANCE | BsplineOptimizer::FEASIBILITY;
 
 void BsplineOptimizer::setParam(rclcpp::Node& nh) {
-  lambda1_ = nh.declare_parameter<double>("optimization/lambda1", -1.0);
-  lambda2_ = nh.declare_parameter<double>("optimization/lambda2", -1.0);
-  lambda3_ = nh.declare_parameter<double>("optimization/lambda3", -1.0);
-  lambda4_ = nh.declare_parameter<double>("optimization/lambda4", -1.0);
-  lambda5_ = nh.declare_parameter<double>("optimization/lambda5", -1.0);
-  lambda6_ = nh.declare_parameter<double>("optimization/lambda6", -1.0);
-  lambda7_ = nh.declare_parameter<double>("optimization/lambda7", -1.0);
-  lambda8_ = nh.declare_parameter<double>("optimization/lambda8", -1.0);
+  // Use declare_parameter with try-catch to handle ROS 2 parameter re-declaration
+  // If already declared, use get_parameter instead
+  auto try_declare = [&nh](const std::string& name, double default_val) -> double {
+    try {
+      return nh.declare_parameter<double>(name, default_val);
+    } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException&) {
+      return nh.get_parameter(name).as_double();
+    }
+  };
+  
+  auto try_declare_int = [&nh](const std::string& name, int default_val) -> int {
+    try {
+      return nh.declare_parameter<int>(name, default_val);
+    } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException&) {
+      return nh.get_parameter(name).as_int();
+    }
+  };
 
-  dist0_     = nh.declare_parameter<double>("optimization/dist0", -1.0);
-  max_vel_   = nh.declare_parameter<double>("optimization/max_vel", -1.0);
-  max_acc_   = nh.declare_parameter<double>("optimization/max_acc", -1.0);
-  visib_min_ = nh.declare_parameter<double>("optimization/visib_min", -1.0);
-  dlmin_     = nh.declare_parameter<double>("optimization/dlmin", -1.0);
-  wnl_       = nh.declare_parameter<double>("optimization/wnl", -1.0);
+  lambda1_ = try_declare("optimization/lambda1", -1.0);
+  lambda2_ = try_declare("optimization/lambda2", -1.0);
+  lambda3_ = try_declare("optimization/lambda3", -1.0);
+  lambda4_ = try_declare("optimization/lambda4", -1.0);
+  lambda5_ = try_declare("optimization/lambda5", -1.0);
+  lambda6_ = try_declare("optimization/lambda6", -1.0);
+  lambda7_ = try_declare("optimization/lambda7", -1.0);
+  lambda8_ = try_declare("optimization/lambda8", -1.0);
 
-  max_iteration_num_[0] = nh.declare_parameter<int>("optimization/max_iteration_num1", -1);
-  max_iteration_num_[1] = nh.declare_parameter<int>("optimization/max_iteration_num2", -1);
-  max_iteration_num_[2] = nh.declare_parameter<int>("optimization/max_iteration_num3", -1);
-  max_iteration_num_[3] = nh.declare_parameter<int>("optimization/max_iteration_num4", -1);
-  max_iteration_time_[0] = nh.declare_parameter<double>("optimization/max_iteration_time1", -1.0);
-  max_iteration_time_[1] = nh.declare_parameter<double>("optimization/max_iteration_time2", -1.0);
-  max_iteration_time_[2] = nh.declare_parameter<double>("optimization/max_iteration_time3", -1.0);
-  max_iteration_time_[3] = nh.declare_parameter<double>("optimization/max_iteration_time4", -1.0);
+  dist0_     = try_declare("optimization/dist0", -1.0);
+  max_vel_   = try_declare("optimization/max_vel", -1.0);
+  max_acc_   = try_declare("optimization/max_acc", -1.0);
+  visib_min_ = try_declare("optimization/visib_min", -1.0);
+  dlmin_     = try_declare("optimization/dlmin", -1.0);
+  wnl_       = try_declare("optimization/wnl", -1.0);
 
-  algorithm1_ = nh.declare_parameter<int>("optimization/algorithm1", -1);
-  algorithm2_ = nh.declare_parameter<int>("optimization/algorithm2", -1);
-  order_      = nh.declare_parameter<int>("optimization/order", -1);
+  max_iteration_num_[0] = try_declare_int("optimization/max_iteration_num1", -1);
+  max_iteration_num_[1] = try_declare_int("optimization/max_iteration_num2", -1);
+  max_iteration_num_[2] = try_declare_int("optimization/max_iteration_num3", -1);
+  max_iteration_num_[3] = try_declare_int("optimization/max_iteration_num4", -1);
+  max_iteration_time_[0] = try_declare("optimization/max_iteration_time1", -1.0);
+  max_iteration_time_[1] = try_declare("optimization/max_iteration_time2", -1.0);
+  max_iteration_time_[2] = try_declare("optimization/max_iteration_time3", -1.0);
+  max_iteration_time_[3] = try_declare("optimization/max_iteration_time4", -1.0);
+
+  algorithm1_ = try_declare_int("optimization/algorithm1", -1);
+  algorithm2_ = try_declare_int("optimization/algorithm2", -1);
+  order_      = try_declare_int("optimization/order", -1);
 }
 
 void BsplineOptimizer::setEnvironment(const EDTEnvironment::Ptr& env) {
@@ -160,6 +178,9 @@ void BsplineOptimizer::optimize() {
     }
   }
 
+  // Initialize best_variable_ with initial values in case optimization fails
+  best_variable_ = q;
+
   if (dim_ != 1) {
     vector<double> lb(variable_num_), ub(variable_num_);
     const double   bound = 10.0;
@@ -171,6 +192,7 @@ void BsplineOptimizer::optimize() {
     opt.set_upper_bounds(ub);
   }
 
+  bool optimization_success = false;
   try {
     // cout << fixed << setprecision(7);
     // vec_time_.clear();
@@ -179,12 +201,19 @@ void BsplineOptimizer::optimize() {
 
     double        final_cost;
     nlopt::result result = opt.optimize(q, final_cost);
+    optimization_success = true;
 
     /* retrieve the optimization result */
     // cout << "Min cost:" << min_cost_ << endl;
   } catch (std::exception& e) {
-    RCLCPP_WARN(rclcpp::get_logger("bspline_opt"), "[Optimization]: nlopt exception");
-    cout << e.what() << endl;
+    RCLCPP_WARN(rclcpp::get_logger("bspline_opt"), "[Optimization]: nlopt exception: %s", e.what());
+    // best_variable_ already initialized with initial values, so we can continue safely
+  }
+
+  // Ensure best_variable_ is valid before using it
+  if (best_variable_.size() != variable_num_) {
+    RCLCPP_ERROR(rclcpp::get_logger("bspline_opt"), "[Optimization]: best_variable_ size mismatch! Using initial values.");
+    best_variable_ = q;
   }
 
   for (int i = order_; i < control_points_.rows(); ++i) {

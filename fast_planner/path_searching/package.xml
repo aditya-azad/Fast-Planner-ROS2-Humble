@@ -17,5 +17,7 @@
   <depend>rclcpp</depend>
   <depend>plan_env</depend>
 
-  <export/>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

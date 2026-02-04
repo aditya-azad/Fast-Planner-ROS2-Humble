@@ -51,6 +51,10 @@
 
 #include <plan_env/raycast.h>
 
+#ifdef USE_NVBLOX
+#include <plan_env/nvblox_sdf_map.h>
+#endif
+
 #define logit(x) (log((x) / (1 - (x))))
 
 using namespace std;
@@ -168,7 +172,11 @@ struct MappingData {
 
 class SDFMap {
 public:
-  SDFMap() {}
+  SDFMap() 
+#ifdef USE_NVBLOX
+    : use_nvblox_backend_(false)
+#endif
+  {}
   ~SDFMap() {}
 
   enum { POSE_STAMPED = 1, ODOMETRY = 2, INVALID_IDX = -10000 };
@@ -209,6 +217,12 @@ public:
                     vector<Eigen::Vector3d>& slice, vector<Eigen::Vector3d>& grad,
                     int sign = 1);  // 1 pos, 2 neg, 3 combined
   void initMap(const std::shared_ptr<rclcpp::Node>& nh);
+  
+  /**
+   * Enable nvblox backend (if available)
+   * @return true if nvblox is available and enabled, false otherwise
+   */
+  bool enableNvbloxBackend();
 
   void publishMap();
   void publishMapInflate(bool all_info = false);
@@ -222,6 +236,10 @@ public:
   bool hasDepthObservation();
   bool odomValid();
   void getRegion(Eigen::Vector3d& ori, Eigen::Vector3d& size);
+  
+#ifdef USE_NVBLOX
+  bool enableNvbloxBackend();
+#endif
   double getResolution();
   Eigen::Vector3d getOrigin();
   int getVoxelNum();
@@ -299,6 +317,12 @@ private:
   uniform_real_distribution<double> rand_noise_;
   normal_distribution<double> rand_noise2_;
   default_random_engine eng_;
+
+#ifdef USE_NVBLOX
+  // Optional nvblox backend
+  std::unique_ptr<fast_planner::NvbloxSDFMapAdapter> nvblox_adapter_;
+  bool use_nvblox_backend_;
+#endif
 };
 
 /* ============================== definition of inline function
@@ -321,6 +345,11 @@ inline void SDFMap::boundIndex(Eigen::Vector3i& id) {
 }
 
 inline double SDFMap::getDistance(const Eigen::Vector3d& pos) {
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->getDistance(pos);
+  }
+#endif
   Eigen::Vector3i id;
   posToIndex(pos, id);
   boundIndex(id);
@@ -341,12 +370,24 @@ inline bool SDFMap::isUnknown(const Eigen::Vector3i& id) {
 }
 
 inline bool SDFMap::isUnknown(const Eigen::Vector3d& pos) {
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->isUnknown(pos);
+  }
+#endif
   Eigen::Vector3i idc;
   posToIndex(pos, idc);
   return isUnknown(idc);
 }
 
 inline bool SDFMap::isKnownFree(const Eigen::Vector3i& id) {
+  Eigen::Vector3d pos;
+  indexToPos(id, pos);
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->isKnownFree(pos);
+  }
+#endif
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
   int adr = toAddress(id1);
@@ -357,6 +398,13 @@ inline bool SDFMap::isKnownFree(const Eigen::Vector3i& id) {
 }
 
 inline bool SDFMap::isKnownOccupied(const Eigen::Vector3i& id) {
+  Eigen::Vector3d pos;
+  indexToPos(id, pos);
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->isKnownOccupied(pos);
+  }
+#endif
   Eigen::Vector3i id1 = id;
   boundIndex(id1);
   int adr = toAddress(id1);
@@ -365,6 +413,11 @@ inline bool SDFMap::isKnownOccupied(const Eigen::Vector3i& id) {
 }
 
 inline double SDFMap::getDistWithGradTrilinear(Eigen::Vector3d pos, Eigen::Vector3d& grad) {
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->getDistWithGradTrilinear(pos, grad);
+  }
+#endif
   if (!isInMap(pos)) {
     grad.setZero();
     return 0;
@@ -436,6 +489,11 @@ inline void SDFMap::setOccupancy(Eigen::Vector3d pos, double occ) {
 }
 
 inline int SDFMap::getOccupancy(Eigen::Vector3d pos) {
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->getOccupancy(pos);
+  }
+#endif
   if (!isInMap(pos)) return -1;
 
   Eigen::Vector3i id;
@@ -445,6 +503,11 @@ inline int SDFMap::getOccupancy(Eigen::Vector3d pos) {
 }
 
 inline int SDFMap::getInflateOccupancy(Eigen::Vector3d pos) {
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->getInflateOccupancy(pos);
+  }
+#endif
   if (!isInMap(pos)) return -1;
 
   Eigen::Vector3i id;

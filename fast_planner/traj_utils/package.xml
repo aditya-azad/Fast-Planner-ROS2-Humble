@@ -19,5 +19,7 @@
   <depend>bspline_opt</depend>
   <depend>pcl_conversions</depend>
 
-  <export/>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

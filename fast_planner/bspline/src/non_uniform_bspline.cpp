@@ -62,6 +62,13 @@ void NonUniformBspline::setKnot(const Eigen::VectorXd& knot) { this->u_ = knot; 
 Eigen::VectorXd NonUniformBspline::getKnot() { return this->u_; }
 
 void NonUniformBspline::getTimeSpan(double& um, double& um_p) {
+  if (u_.size() == 0 || p_ < 0 || m_ < p_) {
+    std::cerr << "[B-spline ERROR]: Invalid spline state in getTimeSpan! u_.size=" << u_.size() 
+              << ", p_=" << p_ << ", m_=" << m_ << std::endl;
+    um = 0.0;
+    um_p = 0.0;
+    return;
+  }
   um   = u_(p_);
   um_p = u_(m_ - p_);
 }

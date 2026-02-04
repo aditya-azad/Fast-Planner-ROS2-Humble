@@ -177,9 +177,25 @@ void SDFMap::initMap(const std::shared_ptr<rclcpp::Node>& nh) {
   }
 
   // use odometry and point cloud
+  // Note: When nvblox backend is enabled, point cloud subscription is not needed
+  // as Fast-Planner gets map data from nvblox adapter instead
 
+#ifdef USE_NVBLOX
+  // Only subscribe to point clouds if nvblox backend is not enabled
+  // Check parameter to see if we should skip point cloud subscription
+  node_->declare_parameter<bool>("sdf_map/use_nvblox", false);
+  bool use_nvblox_param = false;
+  node_->get_parameter("sdf_map/use_nvblox", use_nvblox_param);
+  
+  if (!use_nvblox_param) {
+    indep_cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/sdf_map/cloud", 10, std::bind(&SDFMap::cloudCallback, this, std::placeholders::_1));
+  }
+#else
   indep_cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/sdf_map/cloud", 10, std::bind(&SDFMap::cloudCallback, this, std::placeholders::_1));
+#endif
+
   indep_odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
       "/sdf_map/odom", 10, std::bind(&SDFMap::odomCallback, this, std::placeholders::_1));
 
@@ -213,6 +229,11 @@ void SDFMap::initMap(const std::shared_ptr<rclcpp::Node>& nh) {
   rand_noise2_ = normal_distribution<double>(0, 0.2);
   random_device rd;
   eng_ = default_random_engine(rd());
+
+  // Try to enable nvblox backend if available
+#ifdef USE_NVBLOX
+  enableNvbloxBackend();
+#endif
 }
 
 void SDFMap::resetBuffer() {
@@ -796,7 +817,7 @@ void SDFMap::visCallback() {
   publishMap();
   publishMapInflate(false);
   // publishUpdateRange();
-  // publishESDF();
+  //publishESDF();  // Enable ESDF visualization
 
   // publishUnknown();
   // publishDepth();
@@ -1272,7 +1293,14 @@ void SDFMap::checkDist() {
       }
 }
 
-bool SDFMap::odomValid() { return md_.has_odom_; }
+bool SDFMap::odomValid() { 
+#ifdef USE_NVBLOX
+  if (use_nvblox_backend_ && nvblox_adapter_ && nvblox_adapter_->isAvailable()) {
+    return nvblox_adapter_->odomValid();
+  }
+#endif
+  return md_.has_odom_; 
+}
 
 bool SDFMap::hasDepthObservation() { return md_.has_first_depth_; }
 
@@ -1346,5 +1374,51 @@ void SDFMap::poseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr&
   md_.camera_pos_(1) = pose->pose.position.y;
   md_.camera_pos_(2) = pose->pose.position.z;
 }
+
+#ifdef USE_NVBLOX
+bool SDFMap::enableNvbloxBackend() {
+  if (use_nvblox_backend_) {
+    return true; // Already enabled
+  }
+  
+  if (!node_) {
+    RCLCPP_WARN(rclcpp::get_logger("sdf_map"), 
+                "[Nvblox] Cannot enable nvblox backend: node not initialized");
+    return false;
+  }
+  
+  // Check if nvblox should be enabled via parameter
+  node_->declare_parameter<bool>("sdf_map/use_nvblox", false);
+  bool use_nvblox_param = false;
+  node_->get_parameter("sdf_map/use_nvblox", use_nvblox_param);
+  
+  if (!use_nvblox_param) {
+    RCLCPP_INFO(node_->get_logger(), 
+                "[Nvblox] Nvblox backend disabled by parameter. Using standard SDF map.");
+    return false;
+  }
+  
+  try {
+    nvblox_adapter_ = std::make_unique<fast_planner::NvbloxSDFMapAdapter>();
+    if (nvblox_adapter_->init(node_)) {
+      use_nvblox_backend_ = true;
+      RCLCPP_INFO(node_->get_logger(), 
+                  "[Nvblox] Nvblox backend enabled successfully!");
+      return true;
+    } else {
+      RCLCPP_WARN(node_->get_logger(), 
+                  "[Nvblox] Failed to initialize nvblox adapter, falling back to standard SDF map");
+      nvblox_adapter_.reset();
+      return false;
+    }
+  } catch (const std::exception& e) {
+    RCLCPP_WARN(node_->get_logger(), 
+                "[Nvblox] Exception initializing nvblox adapter: %s. Falling back to standard SDF map.",
+                e.what());
+    nvblox_adapter_.reset();
+    return false;
+  }
+}
+#endif
 
 // SDFMap

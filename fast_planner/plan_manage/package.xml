@@ -35,6 +35,9 @@
   <!-- Optional external msgs (quadrotor_msgs is optional; do not declare hard exec depend) -->
   <!-- <exec_depend>quadrotor_msgs</exec_depend> -->
 
-  <export/>
   <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

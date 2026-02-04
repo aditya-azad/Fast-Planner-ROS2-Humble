@@ -22,5 +22,10 @@
   <depend>message_filters</depend>
   <depend>pcl_conversions</depend>
 
-  <export/>
+  <!-- Optional nvblox support - handled in CMakeLists.txt via find_package(QUIET) -->
+  <!-- nvblox_msgs is optional and will be detected at build time -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

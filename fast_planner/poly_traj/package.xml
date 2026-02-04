@@ -21,5 +21,7 @@
   <!-- Optional external msgs if available -->
   <exec_depend>swarmtal_msgs</exec_depend>
 
-  <export/>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>
