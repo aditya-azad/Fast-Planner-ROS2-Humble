@@ -86,42 +86,6 @@ def generate_launch_description():
         ]
     )
 
-    # ========== PX4 / Gazebo Nodes ==========
-    # NOTE: If using fastplanner_test.sh, PX4 and MicroXRCEAgent are started
-    # separately. Comment these out to avoid conflicts, or run this launch
-    # file standalone.
-
-    # px4_gazebo_command = ExecuteProcess(
-    #     cmd=[
-    #         "bash",
-    #         "-c",
-    #         "$PX4_PATH/build/px4_sitl_default/bin/px4",
-    #     ],
-    #     additional_env={
-    #         "PX4_UXRCE_DDS_NS": quad_name,
-    #         "PX4_SITL_WORLD": world_name,
-    #         "PX4_GZ_WORLD": world_name,
-    #     },
-    #     output="screen",
-    # )
-
-    # microxrce = ExecuteProcess(
-    #     cmd=["bash", "-c", "MicroXRCEAgent udp4 -p 8888"],
-    # )
-
-    gz_depth_bridge_node = Node(
-        package="ros_gz_bridge",
-        executable="parameter_bridge",
-        namespace=quad_name,
-        arguments=[
-            "/depth_camera@sensor_msgs/msg/Image@gz.msgs.Image",
-            "/depth_camera/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked",
-            "/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
-            "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
-        ],
-        output="screen",
-    )
-
     # ========== PX4 Interface Nodes ==========
 
     px4_odom_transform = Node(
@@ -483,15 +447,10 @@ def generate_launch_description():
 
     ld = LaunchDescription(launch_args)
 
-    # PX4/Gazebo - NOTE: microxrce and px4 are started by fastplanner_test.sh
-    # Uncomment if running this launch file standalone
-    # ld.add_action(microxrce)
-    # ld.add_action(px4_gazebo_command)
     ld.add_action(px4_odom_transform)
     ld.add_action(px4_offboard_node)
 
     # Depth camera
-    ld.add_action(gz_depth_bridge_node)
     ld.add_action(stf_camera_depth_frame)
     ld.add_action(depth_static_tf)
 
